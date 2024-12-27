@@ -1,0 +1,1625 @@
+---
+title: "Development Economics Project 2"
+author: "Mohammad Mostafawi"
+date: "`r Sys.Date()`"
+output:
+    html_document:
+        theme: readable    
+        highlight: kate
+        toc: true    
+        toc_depth: 4
+        toc_float: true    
+        df_print: kable
+        code_folding: hide    
+        css: styles.css
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+
+
+
+```{r setup, include=FALSE}
+# Set global options
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+
+
+```
+
+```{r,include=FALSE}
+library("RODBC")
+library("tibble")
+library("dplyr")
+library("ggplot2")
+library("reshape2")
+library("sf")
+library("shiny")
+library("leaflet")
+library("kableExtra")
+library("knitr")
+library("data.table")  
+
+```
+
+
+```{r, results="false", message=FALSE}
+# Establish connection to the Access database
+db <- odbcDriverConnect("Driver={Microsoft Access Driver (*.mdb, *.accdb)}; 
+                        DBQ=M:/TeIAS/Semester 3/Development Economics/Projects/Second Project/rawdata_hazinedaramad_1402/HB1402_14030707.mdb")
+
+# Get the list of all table names in the database
+table_names <- sqlTables(db)$TABLE_NAME
+
+# Create a list to store data frames
+tables <- list()
+
+# Loop over each table name
+for (table in table_names) {
+  suppressMessages({
+    message(paste("Fetching table:", table))  # Message is suppressed here
+    try({
+      table_data <- as_tibble(sqlFetch(db, table))
+      
+      assign(table, table_data, envir = .GlobalEnv)
+      tables[[table]] <- table_data
+    }, silent = TRUE)
+  })
+}
+
+close(db)
+  
+```
+
+## Estimation of the Absolute Poverty Line
+
+The base line of calculation the absolute poverty line in this project,
+comes from the picture that is provided by TA in the Telegram group of
+class. I need to make some assumption to be able to calculate the bundle
+that makes 2100 caleries. first assumption is that in this bundle the
+bread is just Lavash. The only type of price that has been used is
+"Berenj Khareji Daraje 1". I also assume the the weight of each bread of
+Lavash is 250g. another assumption is that the number of units for bread
+is the "Ghors nan" rather than kg of bread. another assumption is that
+for "Makaroni" the number of unit is the number of 700g packages of
+"Makaroni". For milk and yoghourt I have used just pasteurized form of
+them. for meat, I use the price of meat of sheep. for fruit I use apple
+as a common fuit and cosidred it as fuit in bundle of 2100 caleries. for
+leafy vegateables I use "Sabzi Khordan".
+
+```{r}
+# adding weight 
+ U1402P3S01_all <-  U1402P3S01 %>%
+  left_join(U1402Data %>% select(Address, Weight), by = "Address")
+
+R1402P3S01_all <- R1402P3S01 %>%
+  left_join(R1402Data %>% select(Address, Weight), by = "Address")
+
+# replacing non for gram and kilogram with 0
+
+R1402P3S01_all <- R1402P3S01_all %>%
+  mutate_all(~ replace(., is.na(.), 0))
+
+
+U1402P3S01_all <- U1402P3S01_all %>%
+  mutate_all(~ replace(., is.na(.), 0))
+
+# calculation of all amount of conumption of one good
+R1402P3S01_all <- R1402P3S01_all %>%
+  mutate(total = DYCOL03 / 1000 + DYCOL04)
+
+U1402P3S01_all <- U1402P3S01_all %>%
+  mutate(total = DYCOL03 / 1000 + DYCOL04)
+
+# rename
+
+R1402P3S01_all <- R1402P3S01_all %>%
+  rename(
+    goodcode = DYCOL01,
+    price = DYCOL05,
+    value = DYCOL06
+  )
+
+
+
+U1402P3S01_all <- U1402P3S01_all %>%
+  rename(
+    goodcode = DYCOL01,
+    price = DYCOL05,
+    value = DYCOL06
+  )
+# calculation the average weighted price of each good
+calculate_weighted_avg_price <- function(dataset) {
+  dataset %>%
+    group_by(goodcode) %>%
+    summarise(
+      weighted_avg_price = sum(price * Weight, na.rm = TRUE) / sum(Weight, na.rm = TRUE)
+    ) %>%
+    ungroup()
+}
+rural_price_all <- calculate_weighted_avg_price(R1402P3S01_all)
+urban_price_all <- calculate_weighted_avg_price(U1402P3S01_all)
+
+# bundle of 2100 colories
+bundle <- data.frame(
+  goodcode = c(11142, 11118, 11164, 11768, 11411, 11424, 11211, 11231, 11441, 11428, 
+               11611, 11713, 11721, 11533, 11812),
+  quantity = c(32, 3, 1, 0.6, 7, 3, 1.2, 1.5, 0.65, 0.450, 7.2, 4.5, 4.5, 1, 1)
+)
+
+# Calculate the price of the bundle for rural areas
+rural_bundle_price_all <- rural_price_all %>%
+  right_join(bundle, by = "goodcode") %>%
+  mutate(total_price = quantity * weighted_avg_price) %>%
+  summarise(bundle_price = sum(total_price, na.rm = TRUE))
+
+# Calculate the price of the bundle for urban areas
+urban_bundle_price_all <- urban_price_all %>%
+  right_join(bundle, by = "goodcode") %>%
+  mutate(total_price = quantity * weighted_avg_price) %>%
+  summarise(bundle_price = sum(total_price, na.rm = TRUE))
+
+# Print the results
+cat("Absolute Poverty Line in Rural Areas (2100 Calories):", rural_bundle_price_all$bundle_price, "\n")
+cat("Absolute Poverty Line in Urban Areas (2100 Calories):", urban_bundle_price_all$bundle_price, "\n")
+
+
+
+
+```
+
+## Estimation of Relative Poverty Line:
+
+### Traditional Approach
+
+For traditional approach, at first I use a combined dataset which
+includes both urban and rural and then calculate the consumption of all
+of them and then I seperate them to urban and rural. then I calculate
+the Traditional poverty line for all them seperately.
+
+we combine both S03 to S012 and calculate the total expenditure. for
+total expenditure I do not include the S04 which is durable consumption.
+
+```{r, message=FALSE, warning=FALSE}
+
+# Add 'ur' column to the initial datasets
+R1402P3S01$ur <- 0
+R1402P3S02$ur <- 0
+U1402P3S01$ur <- 1
+U1402P3S02$ur <- 1
+
+# Combine rural and urban datasets for S01 and S02
+all_data_S01S02 <- bind_rows(R1402P3S01, R1402P3S02, U1402P3S01, U1402P3S02)
+
+# Summarize total expenditure by Address for S01 and S02, keeping the 'ur' information
+final_data <- suppressMessages(all_data_S01S02 %>%
+  group_by(Address, ur) %>%  # Group by Address and ur
+  summarise(totalexpenditure = sum(DYCOL06, na.rm = TRUE)) %>%
+  ungroup())
+
+# Add 'ur' column to S03 to S12 datasets except S04
+rural_datasets <- list(R1402P3S03, R1402P3S05, R1402P3S06, R1402P3S07, R1402P3S08, R1402P3S09, R1402P3S11, R1402P3S12)
+urban_datasets <- list(U1402P3S03, U1402P3S05, U1402P3S06, U1402P3S07, U1402P3S08, U1402P3S09, U1402P3S11, U1402P3S12)
+
+rural_datasets <- lapply(rural_datasets, function(df) { df$ur <- 0; df })
+urban_datasets <- lapply(urban_datasets, function(df) { df$ur <- 1; df })
+
+# Combine rural and urban datasets for S03 to S12
+all_data_S03S12 <- bind_rows(rural_datasets, urban_datasets)
+
+# Summarize total expenditure by Address for S03 to S12, keeping the 'ur' information
+final_data2 <- suppressMessages(all_data_S03S12 %>%
+  group_by(Address, ur) %>%  # Group by Address and ur
+  summarise(totalexpenditure = sum(DYCOL03, na.rm = TRUE)) %>%
+  ungroup())
+
+# Merge the two datasets on 'Address' and include 'ur'
+combined_data <- merge(final_data, final_data2, by = c("Address", "ur"), suffixes = c("_S01S02", "_S03S012"))
+
+# Calculate the overall total expenditure
+combined_data$totalexpenditure <- combined_data$totalexpenditure_S01S02 + combined_data$totalexpenditure_S03S012
+
+
+
+
+# Add 'ur' column
+U1402P1$ur <- 1
+R1402P1$ur <- 0
+
+# Combine the datasets
+combined_data3 <- bind_rows(U1402P1, R1402P1)
+
+# Group by 'Address' and retain 'ur' while calculating the number of family members
+final_data3 <- combined_data3 %>%
+  group_by(Address) %>%
+  summarise(
+    number_of_members = n()  # Count the number of rows for each address
+  ) %>%
+  ungroup()
+
+
+
+
+
+
+
+# Perform a full join to ensure all addresses are included
+household_combined <- merge(final_data3, combined_data, by = "Address", all = TRUE)
+
+# Calculate per capita expenditure (handling missing values)
+household_combined <- household_combined %>%
+  mutate(percapita_expenditure = totalexpenditure / number_of_members)
+
+
+
+
+
+
+
+
+# Calculate poverty line for urban areas (urban_rural_flag = 1)
+urban_data <- household_combined %>% filter(ur == 1)
+median_per_capita_urban <- median(urban_data$percapita_expenditure, na.rm = TRUE)
+mean_per_capita_urban <- mean(urban_data$percapita_expenditure, na.rm = TRUE)
+poverty_line_median_urban <- 0.5 * median_per_capita_urban
+poverty_line_mean_urban <- 0.5 * mean_per_capita_urban
+
+rural_data <- household_combined %>% filter(ur == 0)
+median_per_capita_rural <- median(rural_data$percapita_expenditure, na.rm = TRUE)
+mean_per_capita_rural <- mean(rural_data$percapita_expenditure, na.rm = TRUE)
+poverty_line_median_rural <- 0.5 * median_per_capita_rural
+poverty_line_mean_rural <- 0.5 * mean_per_capita_rural
+
+# Print the results
+cat("Urban Poverty Line (50% of Median Per Capita Expenditure):", poverty_line_median_urban, "\n")
+cat("Urban Poverty Line (50% of Mean Per Capita Expenditure):", poverty_line_mean_urban, "\n")
+cat("Rural Poverty Line (50% of Median Per Capita Expenditure):", poverty_line_median_rural, "\n")
+cat("Rural Poverty Line (50% of Mean Per Capita Expenditure):", poverty_line_mean_rural, "\n")
+
+```
+
+# Hybrid Approach
+
+In this part first of all I need to sort by per capita non durable
+expenditure. then identify the price that they pey for each good. then I
+can find that for them, how much does it cost to privde the 2100
+calories.
+
+```{r}
+# Filter urban households
+urban_data <- household_combined %>% filter(ur == 1)
+# Identify the bottom 20% of urban households
+poor20percentU <- urban_data %>%
+  arrange(percapita_expenditure) %>% # Sort by per capita expenditure
+  slice(1:(n() * 0.2)) # Select the bottom 20%
+
+# Filter rural households
+rural_data <- household_combined %>% filter(ur == 0)
+# Identify the bottom 20% of rural households
+poor20percentR <- rural_data %>%
+  arrange(percapita_expenditure) %>% # Sort by per capita expenditure
+  slice(1:(n() * 0.2)) # Select the bottom 20%
+
+
+poor20percentU <- poor20percentU %>%
+  left_join(U1402Data %>% select(Address, Weight), by = "Address")
+
+# Add Weight to the Rural dataset
+poor20percentR <- poor20percentR %>%
+  left_join(R1402Data %>% select(Address, Weight), by = "Address")
+
+
+
+R1402P3S01_poor <- R1402P3S01 %>%
+  filter(Address %in% poor20percentR$Address) %>%
+  left_join(poor20percentR %>% select(Address, Weight), by = "Address")
+
+R1402P3S02_poor <- R1402P3S02 %>%
+  filter(Address %in% poor20percentR$Address) %>%
+  left_join(poor20percentR %>% select(Address, Weight), by = "Address")
+
+# Filter urban datasets and add the Weight column for all matching Addresses
+U1402P3S01_poor <- U1402P3S01 %>%
+  filter(Address %in% poor20percentU$Address) %>%
+  left_join(poor20percentU %>% select(Address, Weight), by = "Address")
+
+U1402P3S02_poor <- U1402P3S02 %>%
+  filter(Address %in% poor20percentU$Address) %>%
+  left_join(poor20percentU %>% select(Address, Weight), by = "Address")
+
+R1402P3S01_poor <- R1402P3S01_poor %>%
+  mutate_all(~ replace(., is.na(.), 0))
+
+R1402P3S02_poor <- R1402P3S02_poor %>%
+  mutate_all(~ replace(., is.na(.), 0))
+
+U1402P3S01_poor <- U1402P3S01_poor %>%
+  mutate_all(~ replace(., is.na(.), 0))
+
+U1402P3S02_poor <- U1402P3S02_poor %>%
+  mutate_all(~ replace(., is.na(.), 0))
+
+R1402P3S01_poor <- R1402P3S01_poor %>%
+  mutate(total = DYCOL03 / 1000 + DYCOL04)
+
+R1402P3S02_poor <- R1402P3S02_poor %>%
+  mutate(total = DYCOL03 / 1000 + DYCOL04)
+
+U1402P3S01_poor <- U1402P3S01_poor %>%
+  mutate(total = DYCOL03 / 1000 + DYCOL04)
+
+U1402P3S02_poor <- U1402P3S02_poor %>%
+  mutate(total = DYCOL03 / 1000 + DYCOL04)
+
+R1402P3S01_poor <- R1402P3S01_poor %>%
+  rename(
+    goodcode = DYCOL01,
+    price = DYCOL05,
+    value = DYCOL06
+  )
+
+R1402P3S02_poor <- R1402P3S02_poor %>%
+  rename(
+    goodcode = DYCOL01,
+    price = DYCOL05,
+    value = DYCOL06
+  )
+
+U1402P3S01_poor <- U1402P3S01_poor %>%
+  rename(
+    goodcode = DYCOL01,
+    price = DYCOL05,
+    value = DYCOL06
+  )
+
+U1402P3S02_poor <- U1402P3S02_poor %>%
+  rename(
+    goodcode = DYCOL01,
+    price = DYCOL05,
+    value = DYCOL06
+  )
+
+
+
+# Function to calculate weighted average price for each goodcode
+calculate_weighted_avg_price <- function(dataset) {
+  dataset %>%
+    group_by(goodcode) %>%
+    summarise(
+      weighted_avg_price = sum(price * Weight, na.rm = TRUE) / sum(Weight, na.rm = TRUE)
+    ) %>%
+    ungroup()
+}
+
+# Calculate weighted average price for each dataset
+weighted_avg_R1402P3S01 <- calculate_weighted_avg_price(R1402P3S01_poor)
+weighted_avg_R1402P3S02 <- calculate_weighted_avg_price(R1402P3S02_poor)
+weighted_avg_U1402P3S01 <- calculate_weighted_avg_price(U1402P3S01_poor)
+weighted_avg_U1402P3S02 <- calculate_weighted_avg_price(U1402P3S02_poor)
+
+
+
+
+
+rural_price <- bind_rows(
+  weighted_avg_R1402P3S01,
+  weighted_avg_R1402P3S02
+)
+urban_price <- bind_rows(
+  weighted_avg_U1402P3S01,
+  weighted_avg_U1402P3S02
+)
+
+
+
+# Define the bundle of goods and their quantities
+bundle <- data.frame(
+  goodcode = c(11142, 11118, 11164, 11768, 11411, 11424, 11211, 11231, 11441, 11428, 
+               11611, 11713, 11721, 11533, 11812),
+  quantity = c(32, 3, 1, 0.6, 7, 3, 1.2, 1.5, 0.65, 0.450, 7.2, 4.5, 4.5, 1, 1)
+)
+
+# Calculate the price of the bundle for rural areas
+rural_bundle_price <- rural_price %>%
+  right_join(bundle, by = "goodcode") %>%
+  mutate(total_price = quantity * weighted_avg_price) %>%
+  summarise(bundle_price = sum(total_price, na.rm = TRUE))
+
+# Calculate the price of the bundle for urban areas
+urban_bundle_price <- urban_price %>%
+  right_join(bundle, by = "goodcode") %>%
+  mutate(total_price = quantity * weighted_avg_price) %>%
+  summarise(bundle_price = sum(total_price, na.rm = TRUE))
+
+# Print the results
+cat("Price of the Bundle in Rural Areas (2100 Calories):", rural_bundle_price$bundle_price, "\n")
+cat("Price of the Bundle in Urban Areas (2100 Calories):", urban_bundle_price$bundle_price, "\n")
+
+
+```
+
+There is a very important point here. the price of bundle of 20 percent
+of poorest population in the urban, is 40000 cheaper than rural areas.
+It makes sense that in urban areas, there are more options to be able to
+find goods with lower quality and less price, but in rural areas, there
+are not much options and providing the same bundle is more expensive.
+
+## Calculation of the Poverty Gap
+
+```{r}
+household_combined <- household_combined %>%
+  mutate(
+    province = substr(Address, 2, 3),  # Extract the 2nd and 3rd characters from Address
+    urban_rural = ifelse(ur == 1, "Urban", "Rural")  # Create urban_rural column
+  )
+
+# Define poverty lines (urban and rural bundle prices)
+urban_poverty_line <- urban_bundle_price$bundle_price
+rural_poverty_line <- rural_bundle_price$bundle_price
+
+# Add columns indicating whether each household is poor based on the family-adjusted poverty line
+household_combined <- household_combined %>%
+  mutate(
+    family_urban_poverty_line = number_of_members * urban_poverty_line,  # Adjust for family size
+    family_rural_poverty_line = number_of_members * rural_poverty_line,  # Adjust for family size
+    is_poor_urban = ifelse(ur == 1 & totalexpenditure_S01S02 < family_urban_poverty_line, 1, 0),
+    is_poor_rural = ifelse(ur == 0 & totalexpenditure_S01S02 < family_rural_poverty_line, 1, 0),
+    poverty_gap_U = ifelse(is_poor_urban == 1, (family_urban_poverty_line - totalexpenditure_S01S02)/family_urban_poverty_line, 0),
+    poverty_gap_R = ifelse(is_poor_rural == 1, (family_rural_poverty_line - totalexpenditure_S01S02)/family_rural_poverty_line, 0)
+  )
+
+
+
+# Define province mapping
+province_mapping <- c(
+  "04" = "West Azerbaijan", "03" = "East Azerbaijan", "24" = "Ardabil", "12" = "Kurdistan", 
+  "19" = "Zanjan", "01" = "Gilan", "05" = "Kermanshah", "13" = "Hamadan", "26" = "Qazvin", 
+  "16" = "Ilam", "15" = "Lorestan", "00" = "Markazi", "25" = "Qom", "23" = "Tehran", 
+  "30" = "Alborz", "02" = "Mazandaran", "27" = "Golestan", "28" = "North Khorasan", 
+  "06" = "Khuzestan", "14" = "Chaharmahal and Bakhtiari", "17" = "Kohgiluyeh and Boyer-Ahmad", 
+  "10" = "Isfahan", "20" = "Semnan", "09" = "Razavi Khorasan", "21" = "Yazd", 
+  "29" = "South Khorasan", "18" = "Bushehr", "07" = "Fars", "08" = "Kerman", 
+  "11" = "Sistan and Baluchestan", "22" = "Hormozgan"
+)
+
+
+
+# Replace province codes with province names in the 'poverty_gap_by_province' dataset
+household_combined <- household_combined %>%
+  mutate(province_name = province_mapping[province])
+# Step 1: Filter out urban and rural poor households
+urban_poor <- household_combined %>%
+  filter(ur == 1 & is_poor_urban == 1)  # Keep only urban poor households
+
+rural_poor <- household_combined %>%
+  filter(ur == 0 & is_poor_rural == 1)  # Keep only rural poor households
+
+# Step 2: Calculate poverty gap for urban poor
+urban_poverty_gap <- urban_poor %>%
+  group_by(province_name) %>%
+  summarise(
+    total_poverty_gap_urban = sum(poverty_gap_U, na.rm = TRUE),  # Total shortfall for urban poor
+    total_households_urban = n(),  # Number of urban poor households
+    poverty_gap_urban = total_poverty_gap_urban / total_households_urban,
+    .groups = "drop"
+  )
+
+# Step 3: Calculate poverty gap for rural poor
+rural_poverty_gap <- rural_poor %>%
+  group_by(province_name) %>%
+  summarise(
+    total_poverty_gap_rural = sum(poverty_gap_R, na.rm = TRUE),  # Total shortfall for rural poor
+    total_households_rural = n(),  # Number of rural poor households
+    poverty_gap_rural = total_poverty_gap_rural / total_households_rural,
+    .groups = "drop"
+  )
+
+rural_poverty_gap <- rural_poverty_gap%>%
+  select(province_name,poverty_gap_rural)
+
+urban_poverty_gap <- urban_poverty_gap%>%
+  select(province_name,poverty_gap_urban)
+
+# Print the tables
+rural_poverty_gap
+urban_poverty_gap
+
+```
+
+## MPI calculations
+
+in this part I need to define 10 deimensions for poverty to calculate
+MPI. 2 of those dimensions come from education. if there is one person
+in age if elementary school and does not go to school, this family has
+poverty on that dimension. if family has a member that is old and does
+not have elementary education, this family also has another dimension of
+poverty.
+
+```{r}
+# Rename columns
+U1402P1_mpi <- U1402P1 %>%
+  rename(
+    relation = DYCOL03,
+    age = DYCOL05,
+    literacy = DYCOL06,
+    student = DYCOL07,
+    education = DYCOL08
+  )
+
+R1402P1_mpi <- R1402P1 %>%
+  rename(
+    relation = DYCOL03,
+    age = DYCOL05,
+    literacy = DYCOL06,
+    student = DYCOL07,
+    education = DYCOL08
+  )
+
+# Drop rows with missing values in age, student, or education
+U1402P1_mpi <- U1402P1_mpi %>%
+  filter(!is.na(age) & !is.na(student) & !is.na(education))
+
+R1402P1_mpi <- R1402P1_mpi %>%
+  filter(!is.na(age) & !is.na(student) & !is.na(education))
+
+# Keep only the specified columns plus Address
+U1402P1_mpi <- U1402P1_mpi %>%
+  select(Address, relation, age, literacy, student, education)
+
+R1402P1_mpi <- R1402P1_mpi %>%
+  select(Address, relation, age, literacy, student, education)
+
+# Add dimention1: 1 if age > 13 and education < 1
+U1402P1_mpi <- U1402P1_mpi %>%
+  mutate(dimension1 = ifelse(age > 13 & education < 1, 1, 0))
+
+R1402P1_mpi <- R1402P1_mpi %>%
+  mutate(dimension1 = ifelse(age > 13 & education < 1, 1, 0))
+
+# Add dimention2: 1 if age is between 8 and 14 and student = 0
+U1402P1_mpi <- U1402P1_mpi %>%
+  mutate(dimension2 = ifelse(age >= 8 & age <= 14 & student == 2, 1, 0))
+
+R1402P1_mpi <- R1402P1_mpi %>%
+  mutate(dimension2 = ifelse(age >= 8 & age <= 14 & student == 2, 1, 0))
+
+
+
+
+Umpi <- U1402P1_mpi %>%
+  group_by(Address) %>%
+  summarise(
+    dimension1 = max(dimension1, na.rm = TRUE),  # 1 if any member is poor in dimention1
+    dimension2 = max(dimension2, na.rm = TRUE)   # 1 if any member is poor in dimention2
+  ) %>%
+  ungroup()
+
+# Convert R1402P1_mpi to household level
+Rmpi <- R1402P1_mpi %>%
+  group_by(Address) %>%
+  summarise(
+    dimension1 = max(dimension1, na.rm = TRUE),  # 1 if any member is poor in dimention1
+    dimension2 = max(dimension2, na.rm = TRUE)   # 1 if any member is poor in dimention2
+  ) %>%
+  ungroup()
+```
+
+Now I need to define the rest of dimensions. The next 8 dimentions come
+from necessary tools and needs of life. Dimension 3 is electricity, 4 is
+water, 5 is gas, 6 is Ojagh, 7 is refregerator, 8 is phone, 9 is
+personnal phone and 10 is Shabake Fazelab Shahri.
+
+```{r}
+  
+# Rename columns and replace NA with 0 for U1402P2
+U1402P2_mpi <- U1402P2 %>%
+  rename(
+    electricity = DYCOL31,
+    water = DYCOL30,
+    gas = DYCOL32,
+    Ojagh = DYCOL20,
+    refrigerator = DYCOL19,
+    phone = DYCOL16,
+    tv = DYCOL13,
+    net_fazelabshahri = DYCOL42
+  ) %>%
+  mutate(
+    electricity = replace(electricity, is.na(electricity), 0),
+    water = replace(water, is.na(water), 0),
+    gas = replace(gas, is.na(gas), 0),
+    Ojagh = replace(Ojagh, is.na(Ojagh), 0),
+    refrigerator = replace(refrigerator, is.na(refrigerator), 0),
+    phone = replace(phone, is.na(phone), 0),
+    tv = replace(tv, is.na(tv), 0),
+    net_fazelabshahri = replace(net_fazelabshahri, is.na(net_fazelabshahri), 0)
+  )
+
+# Rename columns and replace NA with 0 for R1402P2
+R1402P2_mpi <- R1402P2 %>%
+  rename(
+    electricity = DYCOL31,
+    water = DYCOL30,
+    gas = DYCOL32,
+    Ojagh = DYCOL20,
+    refrigerator = DYCOL19,
+    phone = DYCOL16,
+    tv = DYCOL13,
+    net_fazelabshahri = DYCOL42
+  ) %>%
+  mutate(
+    electricity = replace(electricity, is.na(electricity), 0),
+    water = replace(water, is.na(water), 0),
+    gas = replace(gas, is.na(gas), 0),
+    Ojagh = replace(Ojagh, is.na(Ojagh), 0),
+    refrigerator = replace(refrigerator, is.na(refrigerator), 0),
+    phone = replace(phone, is.na(phone), 0),
+    tv = replace(tv, is.na(tv), 0),
+    net_fazelabshahri = replace(net_fazelabshahri, is.na(net_fazelabshahri), 0)
+  )
+U1402P2_mpi <- U1402P2_mpi %>%
+  select(Address,electricity, water, gas, Ojagh, refrigerator, phone, tv, net_fazelabshahri)
+
+# Keep only the renamed columns in R1402P2
+R1402P2_mpi <- R1402P2_mpi %>%
+  select(Address,electricity, water, gas, Ojagh, refrigerator, phone, tv, net_fazelabshahri)
+
+# Add poverty dimensions 3 to 10 for U1402P2
+U1402P2_mpi <- U1402P2_mpi %>%
+  mutate(
+    dimension3 = ifelse(electricity == 0, 1, 0),
+    dimension4 = ifelse(water == 0, 1, 0),
+    dimension5 = ifelse(gas == 0, 1, 0),
+    dimension6 = ifelse(Ojagh == 0, 1, 0),
+    dimension7 = ifelse(refrigerator == 0, 1, 0),
+    dimension8 = ifelse(phone == 0, 1, 0),
+    dimension9 = ifelse(tv == 0, 1, 0),
+    dimension10 = ifelse(net_fazelabshahri == 0, 1, 0)
+  )
+
+# Add poverty dimensions 3 to 10 for R1402P2
+R1402P2_mpi <- R1402P2_mpi %>%
+  mutate(
+    dimension3 = ifelse(electricity == 0, 1, 0),
+    dimension4 = ifelse(water == 0, 1, 0),
+    dimension5 = ifelse(gas == 0, 1, 0),
+    dimension6 = ifelse(Ojagh == 0, 1, 0),
+    dimension7 = ifelse(refrigerator == 0, 1, 0),
+    dimension8 = ifelse(phone == 0, 1, 0),
+    dimension9 = ifelse(tv == 0, 1, 0),
+    dimension10 = ifelse(net_fazelabshahri == 0, 1, 0)
+  )
+
+U1402P2_mpi <- U1402P2_mpi %>%
+  select(Address,dimension3,dimension4,dimension5,dimension6,dimension7,dimension8,dimension9,dimension10)
+R1402P2_mpi <- R1402P2_mpi %>%
+  select(Address,dimension3,dimension4,dimension5,dimension6,dimension7,dimension8,dimension9,dimension10)
+
+Umpi <- Umpi %>%
+  inner_join(U1402P2_mpi, by = "Address")
+
+# Merge rural datasets (R1402P2_mpi and Rmpi) by Address
+Rmpi <- Rmpi %>%
+  inner_join(R1402P2_mpi, by = "Address")
+
+
+
+
+Umpi <- Umpi %>%
+  left_join(U1402Data %>% select(Address, Weight), by = "Address")
+
+# Add the Weight column to Rmpi
+Rmpi <- Rmpi %>%
+  left_join(R1402Data %>% select(Address, Weight), by = "Address")
+
+
+
+
+```
+
+Now we need to define a threshhold that says from where people are
+considered as poor in MPI. I have chosen 0.33 as threshold. I mean if a
+family does have poverty in more than 3 out of 10 dimensions, then that
+family is considered as poor.
+
+```{r}
+
+# Function to calculate MPI
+calculate_mpi <- function(data, weight_column = "Weight") {
+  # Number of dimensions
+  num_dimensions <- 10
+  
+  # Calculate the deprivation score and whether each household is multidimensionally poor
+  data <- data %>%
+    mutate(
+      deprivation_score = (dimension1 + dimension2 + dimension3 + dimension4 + dimension5 +
+                           dimension6 + dimension7 + dimension8 + dimension9 + dimension10) / num_dimensions,
+      is_poor = ifelse(deprivation_score >= 0.33, 1, 0),  # Threshold for multidimensional poverty
+      weighted_deprivation = deprivation_score * !!sym(weight_column),  # Weighted deprivation score
+      weighted_poor = is_poor * !!sym(weight_column)  # Weighted poor households
+    )
+  
+  # Calculate headcount ratio (H) and average intensity (A)
+  total_weight <- sum(data[[weight_column]], na.rm = TRUE)
+  H <- sum(data$weighted_poor, na.rm = TRUE) / total_weight
+  A <- sum(data$weighted_deprivation[data$is_poor == 1], na.rm = TRUE) /
+       sum(data$weighted_poor, na.rm = TRUE)
+  
+  # Calculate MPI
+  MPI <- H * A
+  
+  list(MPI = MPI, Headcount = H, Intensity = A)
+}
+
+# Calculate MPI for urban areas
+mpi_urban <- calculate_mpi(Umpi)
+
+# Calculate MPI for rural areas
+mpi_rural <- calculate_mpi(Rmpi)
+
+# Print the results
+cat("Urban MPI Results:\n")
+cat("MPI:", mpi_urban$MPI, "\n")
+cat("Headcount Ratio (H):", mpi_urban$Headcount, "\n")
+cat("Average Intensity (A):", mpi_urban$Intensity, "\n")
+
+cat("\nRural MPI Results:\n")
+cat("MPI:", mpi_rural$MPI, "\n")
+cat("Headcount Ratio (H):", mpi_rural$Headcount, "\n")
+cat("Average Intensity (A):", mpi_rural$Intensity, "\n")
+
+
+```
+
+Generally the MPI is very low for Iran according to many subsidies.
+another point is that we did not included any dimension related to
+health except the Fazelab one. As it was expected the MPI is very lower
+in Urban areas in comparison to rural.
+
+# Inequality Part
+
+## Gini coefficeint
+
+## HEIS
+
+this part I should calculate the income for each household
+
+```{r}
+
+# Replace NA values with 0 in DYCOL15 for U1402P4S01 and U1402P4S02 (Urban)
+U1402P4S01 <- U1402P4S01 %>%
+  mutate(DYCOL15 = ifelse(is.na(DYCOL15), 0, DYCOL15))  # Replace NA with 0
+
+U1402P4S02 <- U1402P4S02 %>%
+  mutate(DYCOL15 = ifelse(is.na(DYCOL15), 0, DYCOL15))  # Replace NA with 0
+
+# Replace NA values with 0 in DYCOL15 for R1402P4S01 and R1402P4S02 (Rural)
+R1402P4S01 <- R1402P4S01 %>%
+  mutate(DYCOL15 = ifelse(is.na(DYCOL15), 0, DYCOL15))  # Replace NA with 0
+
+R1402P4S02 <- R1402P4S02 %>%
+  mutate(DYCOL15 = ifelse(is.na(DYCOL15), 0, DYCOL15))  # Replace NA with 0
+
+# For Urban Dataset (U1402P4S1)
+U_total_income <- U1402P4S01 %>%
+  rename(income = DYCOL15)  # Rename DYCOL15 to income
+
+# For Rural Dataset (R1402P4S1)
+R_total_income <- R1402P4S01 %>%
+  rename(income = DYCOL15)  # Rename DYCOL15 to income
+
+# Calculate total income for each family (Address) in Urban dataset
+U_total_income <- U_total_income %>%
+  group_by(Address) %>%
+  summarise(income1 = sum(income, na.rm = TRUE))  # Sum income for each Address
+
+# Calculate total income for each family (Address) in Rural dataset
+R_total_income <- R_total_income %>%
+  group_by(Address) %>%
+  summarise(income1 = sum(income, na.rm = TRUE))  # Sum income for each Address
+
+
+# For Urban Dataset (U1402P4S1)
+Uincome2 <- U1402P4S02 %>%
+  rename(income = DYCOL15)  # Rename DYCOL15 to income
+
+# For Rural Dataset (R1402P4S1)
+Rincome2 <- R1402P4S02 %>%
+  rename(income = DYCOL15)  # Rename DYCOL15 to income
+
+# Calculate total income for each family (Address) in Urban dataset
+Uincome2 <- Uincome2 %>%
+  group_by(Address) %>%
+  summarise(income2 = sum(income, na.rm = TRUE))  # Sum income for each Address
+
+# Calculate total income for each family (Address) in Rural dataset
+Rincome2 <- Rincome2 %>%
+  group_by(Address) %>%
+  summarise(income2 = sum(income, na.rm = TRUE))  # Sum income for each Address
+
+
+
+Uincome3 <- U1402P4S03 %>%
+  mutate(across(DYCOL03:DYCOL08, ~replace(., is.na(.), 0))) %>%  # Replace NA with 0 for DYCOL03 to DYCOL08
+  mutate(income3 = DYCOL03 + DYCOL04 + DYCOL05 + DYCOL06 + DYCOL07 + DYCOL08)  # Sum the columns to create income3
+
+# For R1402P4S03 (Rural)
+Rincome3<- R1402P4S03 %>%
+  mutate(across(DYCOL03:DYCOL08, ~replace(., is.na(.), 0))) %>%  # Replace NA with 0 for DYCOL03 to DYCOL08
+  mutate(income3 = DYCOL03 + DYCOL04 + DYCOL05 + DYCOL06 + DYCOL07 + DYCOL08)  # Sum the columns to create income3
+
+# Now, aggregate the data at the household level (group by Address)
+Uincome3 <- Uincome3 %>%
+  group_by(Address) %>%
+  summarise(income3 = sum(income3, na.rm = TRUE))  # Sum income3 for each household
+
+Rincome3 <- Rincome3 %>%
+  group_by(Address) %>%
+  summarise(income3 = sum(income3, na.rm = TRUE))
+
+
+
+
+
+
+# Replace NA values with 0 in DYCOL15 for U1402P4S01 and U1402P4S02 (Urban)
+U1402P4S04 <- U1402P4S04 %>%
+  mutate(Dycol05 = ifelse(is.na(Dycol05), 0, Dycol05))  # Replace NA with 0
+
+# Replace NA values with 0 in DYCOL15 for R1402P4S01 and R1402P4S02 (Rural)
+R1402P4S04 <- R1402P4S04 %>%
+  mutate(Dycol05 = ifelse(is.na(Dycol05), 0, Dycol05))  # Replace NA with 0
+
+# For Urban Dataset (U1402P4S1)
+Uincome4 <- U1402P4S04 %>%
+  rename(income = Dycol05)  # Rename DYCOL15 to income
+
+# For Rural Dataset (R1402P4S1)
+Rincome4<- R1402P4S04 %>%
+  rename(income = Dycol05)  # Rename DYCOL15 to income
+
+# Calculate total income for each family (Address) in Urban dataset
+Uincome4 <- Uincome4 %>%
+  group_by(Address) %>%
+  summarise(income4 = sum(income, na.rm = TRUE))  # Sum income for each Address
+
+# Calculate total income for each family (Address) in Rural dataset
+Rincome4 <- Rincome4 %>%
+  group_by(Address) %>%
+  summarise(income4 = sum(income, na.rm = TRUE))  # Sum income for each Address
+
+U_total_income <- U_total_income %>%
+  full_join(Uincome2, by = "Address") %>%
+  full_join(Uincome3, by = "Address") %>%
+  full_join(Uincome4, by = "Address") %>%
+  select(Address, income1, income2, income3, income4)  # Select desired columns
+
+# Merge for Rural (R_total_income and Rincome2, Rincome3, Rincome4)
+R_total_income <- R_total_income %>%
+  full_join(Rincome2, by = "Address") %>%
+  full_join(Rincome3, by = "Address") %>%
+  full_join(Rincome4, by = "Address") %>%
+  select(Address, income1, income2, income3, income4)
+
+# Replace NAs with 0 for Urban and Rural Total Income datasets
+U_total_income <- U_total_income %>%
+  mutate(across(income1:income4, ~replace(., is.na(.), 0))) %>%
+  mutate(total_income = income1 + income2 + income3 + income4)  # Summing all incomes
+
+R_total_income <- R_total_income %>%
+  mutate(across(income1:income4, ~replace(., is.na(.), 0))) %>%
+  mutate(total_income = income1 + income2 + income3 + income4)  # Summing all incomes
+
+# Merge the weights from U1402Data into U_total_income by Address
+U_total_income <- U_total_income %>%
+  left_join(U1402Data %>% select(Address, Weight), by = "Address")
+
+# Merge the weights from R1402Data into R_total_income by Address
+R_total_income <- R_total_income %>%
+  left_join(R1402Data %>% select(Address, Weight), by = "Address")
+
+
+
+
+```
+
+now lets calculate the Gini coefficient from HEIS:
+
+```{r}
+# Calculate the Weighted Gini Coefficient for a dataset
+calculate_weighted_gini <- function(income_data) {
+  # Sort data by total income
+  sorted_income <- income_data[order(income_data$total_income), ]
+  
+  # Get the weights and total income for each household
+  sorted_income$Weight <- sorted_income$Weight
+  sorted_income$income <- sorted_income$total_income
+  
+  # Number of households
+  n <- nrow(sorted_income)
+  
+  # Cumulative sums of weights and income
+  sorted_income$cumulative_income <- cumsum(sorted_income$income)
+  sorted_income$cumulative_weight <- cumsum(sorted_income$Weight)
+  
+  # Total income and total weight
+  total_income <- sum(sorted_income$income)
+  total_weight <- sum(sorted_income$Weight)
+  
+  # Weighted Gini formula
+  weighted_gini <- 1 - (2 * sum(sorted_income$Weight * sorted_income$cumulative_income) / (total_income * total_weight))
+  
+  return(weighted_gini)
+}
+
+# Calculate Gini for Urban and Rural areas
+gini_urban <- calculate_weighted_gini(U_total_income)
+gini_rural <- calculate_weighted_gini(R_total_income)
+
+# Print results
+cat("Weighted Gini Coefficient for Urban Area:", gini_urban, "\n")
+cat("Weighted Gini Coefficient for Rural Area:", gini_rural, "\n")
+```
+
+## one percent share:
+
+```{r}
+# Function to calculate the share of the top 1% income/expenditure with weights
+calculate_top_1_share_weighted <- function(income_data) {
+  # Sort data by total income (weighted) in descending order
+  income_data <- income_data[order(-income_data$total_income), ]
+  
+  # Calculate the total weighted income (income * weight)
+  total_income_weighted <- sum(income_data$total_income * income_data$Weight)
+  
+  # Get the number of households in the top 1%
+  top_1_percent_count <- ceiling(0.01 * nrow(income_data))  # 1% of the households
+  
+  # Sum the income of the top 1% (considering weights)
+  top_1_income_weighted <- sum(income_data$total_income[1:top_1_percent_count] * income_data$Weight[1:top_1_percent_count])
+  
+  # Calculate the share of the total income held by the top 1% (weighted)
+  top_1_share_weighted <- top_1_income_weighted / total_income_weighted
+  
+  return(top_1_share_weighted)
+}
+
+# Calculate Top 1% Share for Urban and Rural areas (with weights)
+top_1_share_urban_weighted <- calculate_top_1_share_weighted(U_total_income)
+top_1_share_rural_weighted <- calculate_top_1_share_weighted(R_total_income)
+
+# Print the results
+cat("Top 1% Share of Income for Urban Area (Weighted):", top_1_share_urban_weighted * 100, "%\n")
+cat("Top 1% Share of Income for Rural Area (Weighted):", top_1_share_rural_weighted * 100, "%\n")
+
+
+```
+
+# Welfare data
+
+## Gini coefficient
+
+for this part, I have used monthly consumption from card as a proxy of
+income. then I multiplied it by 12 to get the yearly income then with
+that, I calculated the gini coefficeint for urban and rural seperately.
+
+```{r, message=FALSE, warning=FALSE}
+
+# Set the file path and uploade the data
+file_path <- "M:/TeIAS/Semester 3/Development Economics/Projects/Second Project/welfaredata/nemone_2_darsadi_1402.csv"
+# Read the CSV using fread (faster than read.csv)
+welfare_data <- fread(file_path)
+
+# Step 1: Calculate yearly consumption
+welfare_data[, yearly_consumption := CardPerMonth_1402 * 12]
+
+# Step 2: Select necessary columns (without using dplyr's select)
+welfare_data <- welfare_data[, .(Parent_Id, yearly_consumption, isurban, 
+                                 SabteAhval_countyname, SabteAhval_provincename)]
+
+# Step 3: Aggregate data to household level
+welfare_data <- welfare_data[, .(
+  yearly_consumption = sum(yearly_consumption, na.rm = TRUE),
+  SabteAhval_countyname = first(SabteAhval_countyname),
+  SabteAhval_provincename = first(SabteAhval_provincename),
+  isurban = first(isurban)
+), by = Parent_Id]
+```
+
+```{r}
+
+urban_data <- welfare_data %>% filter(isurban == 1)
+rural_data <- welfare_data%>% filter(isurban == 0)
+
+urban_data <- urban_data %>%
+  mutate(yearly_consumption = as.numeric(yearly_consumption))
+
+rural_data <- rural_data %>%
+  mutate(yearly_consumption = as.numeric(yearly_consumption))
+
+# Step 4: Drop observations where yearly_consumption is zero
+urban_data <- urban_data %>% filter(yearly_consumption > 0)
+rural_data <- rural_data %>% filter(yearly_consumption > 0)
+
+# Step 5: Define the Gini function
+calculate_gini <- function(values) {
+  n <- length(values)
+  values <- sort(values)
+  cum_values <- cumsum(values)
+  G <- 1 + (1 / n) - (2 / (n * sum(values))) * sum((n:1) * values)
+  return(G)
+}
+
+# Step 6: Calculate Gini coefficients for urban and rural areas
+gini_urban <- calculate_gini(urban_data$yearly_consumption)
+gini_rural <- calculate_gini(rural_data$yearly_consumption)
+
+# Print the results
+print(paste("Gini Coefficient for Urban Areas:", round(gini_urban, 4)))
+print(paste("Gini Coefficient for Rural Areas:", round(gini_rural, 4)))
+
+```
+
+## top one percent share for welfare data
+
+```{r}
+
+# Step 1: Calculate Top 1% Share for Urban and Rural Data
+calculate_top_1_percent_share <- function(data) {
+  # Sort data in descending order of yearly_consumption
+  sorted_data <- data %>% arrange(desc(yearly_consumption))
+  
+  # Determine the number of households in the top 1%
+  top_1_count <- ceiling(0.01 * nrow(sorted_data))
+  
+  # Sum the yearly consumption of the top 1%
+  top_1_sum <- sum(sorted_data$yearly_consumption[1:top_1_count], na.rm = TRUE)
+  
+  # Calculate the total yearly consumption
+  total_sum <- sum(sorted_data$yearly_consumption, na.rm = TRUE)
+  
+  # Calculate the share of the top 1%
+  top_1_share <- (top_1_sum / total_sum) * 100
+  
+  return(top_1_share)
+}
+
+# Calculate for urban and rural datasets
+top_1_share_urban <- calculate_top_1_percent_share(urban_data)
+top_1_share_rural <- calculate_top_1_percent_share(rural_data)
+
+# Print the results
+print(paste("Top 1% Share for Urban Areas:", round(top_1_share_urban, 2), "%"))
+print(paste("Top 1% Share for Rural Areas:", round(top_1_share_rural, 2), "%"))
+
+
+```
+
+# Comparative Analysis
+
+## comparison between two datasets in Results
+
+The Gini Coefficient for uran and rural in HEIS were 0.26 and 0.40 and
+in welfare data they were almost 0.60 for both rural and urban areas. In
+HEIS we truly tries to calculate the true income of people but in
+welfare data we used a consumption proxy for income which can make some
+problems. in HEIS the inequality seems less than welfare dataset. this
+can be because of the fact that welfare data includes entire population
+including most wealthiest part of society but the HEIS does not fully
+include the most wealthy part of population. another reason can be the
+fact that in welfare data we did not have income and we used monthly
+consumption instead(we made it yearly). We considered the fact that both
+data of welfare and data of HEIS focuses on year 1402.
+
+Another comparison is for top 1 percentage share. for welfare data for
+urban it is 14.6 percentage and for rural its 15.5 percentage. for HEIS
+these numbers for urban is 7.5 percentage and for rural it is 6.5
+percentage. as we see the share of top one percent is much more in
+welfare data due to the fact that this data is more including for most
+wealthiest of society.
+
+# Geographic Analysis and Comparison
+
+# Inequality
+
+## Gini Coeffcient for Urban and Rural from HEIS
+
+adding province to the total income data and then calculation of Gini
+coefficient for each province in both rural and urban levels.
+```{r, message=FALSE, warning=FALSE}
+U_total_income <- U_total_income %>%
+  mutate(
+    province = substr(Address, 2, 3),  # Extract the 2nd and 3rd characters from Address
+  )
+
+
+R_total_income <- R_total_income %>%
+  mutate(
+    province = substr(Address, 2, 3),  # Extract the 2nd and 3rd characters from Address
+  )
+
+R_total_income <- R_total_income %>%
+  mutate(province_name = province_mapping[province])
+
+# Add province_name to U_total_income
+U_total_income <- U_total_income %>%
+  mutate(province_name = province_mapping[province])
+
+# Corrected Weighted Gini Coefficient Function
+calculate_weighted_gini <- function(data) {
+  # Sort data by total income
+  data <- data[order(data$total_income), ]
+  
+  # Extract weights and incomes
+  weights <- data$Weight
+  incomes <- data$total_income
+  
+  # Total weight and income
+  total_weight <- sum(weights)
+  total_income <- sum(incomes * weights)
+  
+  # Cumulative proportions of weights and weighted incomes
+  cumulative_weight <- cumsum(weights) / total_weight
+  cumulative_income <- cumsum(incomes * weights) / total_income
+  
+  # Gini formula
+  gini <- 1 - sum((cumulative_income[-1] + cumulative_income[-length(cumulative_income)]) * diff(cumulative_weight))
+  
+  return(gini)
+}
+
+# Calculate Gini coefficient for each province in U_total_income (Urban)
+gini_by_province_urban <- U_total_income %>%
+  group_by(province, province_name) %>%
+  summarise(
+    gini_coefficient = calculate_weighted_gini(cur_data())
+  )
+
+# Calculate Gini coefficient for each province in R_total_income (Rural)
+gini_by_province_rural <- R_total_income %>%
+  group_by(province, province_name) %>%
+  summarise(
+    gini_coefficient = calculate_weighted_gini(cur_data())
+  )
+  
+
+gini_by_province_rural<- gini_by_province_rural%>%
+  select(province_name, gini_coefficient)
+gini_by_province_urban<- gini_by_province_urban%>%
+  select(province_name, gini_coefficient)
+
+gini_by_province_rural<- gini_by_province_rural%>%
+  rename(gini_coefficient_rural=gini_coefficient)
+gini_by_province_urban<- gini_by_province_urban%>%
+  rename(gini_coefficient_urban=gini_coefficient)
+
+gini_by_province_urban
+
+gini_by_province_rural
+
+```
+
+Now lets import the data of Iran provinces in shapefile and then use it
+for our interactive map:
+
+```{r, message=FALSE, warning=FALSE}
+
+
+
+iran <- sf::st_read("M:/TeIAS/Semester 3/Development Economics/Projects/Second Project/Mapping/iranmap/irn_admbnda_adm1_unhcr_20190514.shp")
+iran <- rename(iran, province_name = ADM1_EN)
+
+R_gini_data <- gini_by_province_rural %>% select(province_name, gini_coefficient_rural)
+
+# Join the shapefile with Gini index data
+R_iran_gini <- left_join(iran, R_gini_data, by = "province_name")
+
+
+# Create a color palette based on the Gini coefficient
+pal <- colorNumeric(palette = "YlOrRd", domain = R_iran_gini$gini_coefficient_rural)
+
+# Prepare labels for the map to show the province and Gini coefficient
+labels <- sprintf(
+  "<strong>%s</strong><br/>Gini Index for Rural: %g",
+  R_iran_gini$province_name, R_iran_gini$gini_coefficient_rural
+) %>% lapply(htmltools::HTML)
+
+# Create the leaflet map
+map <- leaflet(R_iran_gini) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>% # Use a base tile layer
+  addPolygons(
+    fillColor = ~pal(gini_coefficient_rural), # Color polygons based on Gini coefficient
+    fillOpacity = 1,
+    weight = 0.3,
+    smoothFactor = 0.3,
+    label = labels,
+    labelOptions = labelOptions(
+      style = list("font-family" = "serif", "font-weight" = "normal", padding = "3px 8px"),
+      "box-shadow" = "3px 3px rgba(0,0,0,0.25)",
+      "font-size" = "12px",
+      "border-color" = "rgba(0,0,0,0.5)",
+      direction = "auto"
+    ),
+    highlightOptions = highlightOptions(color = "black", weight = 2, bringToFront = TRUE)
+  ) %>%
+  addLegend(
+    pal = pal,
+    values = R_iran_gini$gini_coefficient_rural,
+    position = "bottomright",
+    title = "Gini Index for Rural Areas"
+  )
+
+# Display the map
+map
+
+
+
+
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+
+
+U_gini_data <- gini_by_province_urban %>% select(province_name, gini_coefficient_urban)
+
+# Join the shapefile with Gini index data
+U_iran_gini <- left_join(iran, U_gini_data, by = "province_name")
+
+
+
+# Create a color palette based on the Gini coefficient
+pal <- colorNumeric(palette = "YlOrRd", domain = U_iran_gini$gini_coefficient_urban)
+
+# Prepare labels for the map to show the province and Gini coefficient
+labels <- sprintf(
+  "<strong>%s</strong><br/>Gini Index for Urban: %g",
+  U_iran_gini$province_name, U_iran_gini$gini_coefficient_urban
+) %>% lapply(htmltools::HTML)
+
+# Create the leaflet map
+map <- leaflet(U_iran_gini) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>% # Use a base tile layer
+  addPolygons(
+    fillColor = ~pal(gini_coefficient_urban), # Color polygons based on Gini coefficient
+    fillOpacity = 1,
+    weight = 0.3,
+    smoothFactor = 0.3,
+    label = labels,
+    labelOptions = labelOptions(
+      style = list("font-family" = "serif", "font-weight" = "normal", padding = "3px 8px"),
+      "box-shadow" = "3px 3px rgba(0,0,0,0.25)",
+      "font-size" = "12px",
+      "border-color" = "rgba(0,0,0,0.5)",
+      direction = "auto"
+    ),
+    highlightOptions = highlightOptions(color = "black", weight = 2, bringToFront = TRUE)
+  ) %>%
+  addLegend(
+    pal = pal,
+    values = U_iran_gini$gini_coefficient_urban,
+    position = "bottomright",
+    title = "Gini Index for Urban Areas"
+  )
+
+# Display the map
+map
+
+
+
+```
+
+## top 1 percent share for urban and rural from HEIS
+
+first I should calculate it for province level.
+
+```{r, message=FALSE, warning=FALSE}
+
+# Calculate Top 1% Share for each province in U_total_income (Urban)
+U_top_1_percent_province <- U_total_income %>%
+  group_by(province, province_name) %>%
+  summarise(
+    top_1_percent_share = calculate_top_1_share_weighted(cur_data())
+  )
+
+# Calculate Top 1% Share for each province in R_total_income (Rural)
+R_top_1_percent_province <- R_total_income %>%
+  group_by(province, province_name) %>%
+  summarise(
+    top_1_percent_share = calculate_top_1_share_weighted(cur_data())
+  )
+
+
+R_top_1_percent <- R_top_1_percent_province %>% select(province_name, top_1_percent_share)
+
+# Join the shapefile with Gini index data
+R_top_iran_1_percent <- left_join(iran, R_top_1_percent, by = "province_name")
+
+
+U_top_1_percent <- U_top_1_percent_province %>% select(province_name, top_1_percent_share)
+
+# Join the shapefile with Gini index data
+U_top_iran_1_percent <- left_join(iran, U_top_1_percent, by = "province_name")
+
+
+
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+
+
+# Create a color palette based on the Gini coefficient
+pal <- colorNumeric(palette = "YlOrRd", domain = R_top_iran_1_percent$top_1_percent_share)
+
+# Prepare labels for the map to show the province and Gini coefficient
+labels <- sprintf(
+  "<strong>%s</strong><br/>Top 1 Percent Share Index for Rural : %g",
+  R_top_iran_1_percent$province_name, R_top_iran_1_percent$top_1_percent_share
+) %>% lapply(htmltools::HTML)
+
+# Create the leaflet map
+map <- leaflet(R_top_iran_1_percent) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>% # Use a base tile layer
+  addPolygons(
+    fillColor = ~pal(top_1_percent_share), # Color polygons based on Gini coefficient
+    fillOpacity = 1,
+    weight = 0.3,
+    smoothFactor = 0.3,
+    label = labels,
+    labelOptions = labelOptions(
+      style = list("font-family" = "serif", "font-weight" = "normal", padding = "3px 8px"),
+      "box-shadow" = "3px 3px rgba(0,0,0,0.25)",
+      "font-size" = "12px",
+      "border-color" = "rgba(0,0,0,0.5)",
+      direction = "auto"
+    ),
+    highlightOptions = highlightOptions(color = "black", weight = 2, bringToFront = TRUE)
+  ) %>%
+  addLegend(
+    pal = pal,
+    values = R_top_iran_1_percent$top_1_percent_share,
+    position = "bottomright",
+    title = "Top 1 Percent Share Index for Rural Areas"
+  )
+
+# Display the map
+map
+
+
+```
+
+```{r}
+
+# Create a color palette based on the Gini coefficient
+pal <- colorNumeric(palette = "YlOrRd", domain = U_top_iran_1_percent$top_1_percent_share)
+
+# Prepare labels for the map to show the province and Gini coefficient
+labels <- sprintf(
+  "<strong>%s</strong><br/>Top 1 Percent Share Index for Urban : %g",
+  U_top_iran_1_percent$province_name, U_top_iran_1_percent$top_1_percent_share
+) %>% lapply(htmltools::HTML)
+
+# Create the leaflet map
+map <- leaflet(U_top_iran_1_percent) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>% # Use a base tile layer
+  addPolygons(
+    fillColor = ~pal(top_1_percent_share), # Color polygons based on Gini coefficient
+    fillOpacity = 1,
+    weight = 0.3,
+    smoothFactor = 0.3,
+    label = labels,
+    labelOptions = labelOptions(
+      style = list("font-family" = "serif", "font-weight" = "normal", padding = "3px 8px"),
+      "box-shadow" = "3px 3px rgba(0,0,0,0.25)",
+      "font-size" = "12px",
+      "border-color" = "rgba(0,0,0,0.5)",
+      direction = "auto"
+    ),
+    highlightOptions = highlightOptions(color = "black", weight = 2, bringToFront = TRUE)
+  ) %>%
+  addLegend(
+    pal = pal,
+    values = U_top_iran_1_percent$top_1_percent_share,
+    position = "bottomright",
+    title = "Top 1 Percent Share Index for Urban Areas"
+  )
+
+# Display the map
+map
+
+```
+
+## Poverty Gap Geographic Analysis
+
+```{r}
+
+rural_poverty_gap <- rural_poverty_gap %>% select(province_name, poverty_gap_rural)
+
+rural_poverty_gap <- left_join(iran, rural_poverty_gap, by = "province_name")
+
+
+urban_poverty_gap <- urban_poverty_gap %>% select(province_name, poverty_gap_urban)
+
+urban_poverty_gap <- left_join(iran, urban_poverty_gap, by = "province_name")
+
+pal <- colorNumeric(palette = "YlOrRd", domain = rural_poverty_gap$poverty_gap_rural)
+
+labels <- sprintf(
+  "<strong>%s</strong><br/>Poverty Gap for Rural: %g",
+  rural_poverty_gap$province_name, rural_poverty_gap$poverty_gap_rural
+) %>% lapply(htmltools::HTML)
+
+# Create the leaflet map
+map <- leaflet(rural_poverty_gap) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>% # Use a base tile layer
+  addPolygons(
+    fillColor = ~pal(poverty_gap_rural), # Color polygons 
+    fillOpacity = 1,
+    weight = 0.3,
+    smoothFactor = 0.3,
+    label = labels,
+    labelOptions = labelOptions(
+      style = list("font-family" = "serif", "font-weight" = "normal", padding = "3px 8px"),
+      "box-shadow" = "3px 3px rgba(0,0,0,0.25)",
+      "font-size" = "12px",
+      "border-color" = "rgba(0,0,0,0.5)",
+      direction = "auto"
+    ),
+    highlightOptions = highlightOptions(color = "black", weight = 2, bringToFront = TRUE)
+  ) %>%
+  addLegend(
+    pal = pal,
+    values = rural_poverty_gap$poverty_gap_rural,
+    position = "bottomright",
+    title = "Poverty Gap in Rural Areas"
+  )
+
+# Display the map
+map
+
+
+
+```
+
+```{r}
+
+
+pal <- colorNumeric(palette = "YlOrRd", domain = urban_poverty_gap$poverty_gap_urban)
+
+labels <- sprintf(
+  "<strong>%s</strong><br/>Poverty Gap for Urban: %g",
+  urban_poverty_gap$province_name, urban_poverty_gap$poverty_gap_urban
+) %>% lapply(htmltools::HTML)
+
+# Create the leaflet map
+map <- leaflet(urban_poverty_gap) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>% # Use a base tile layer
+  addPolygons(
+    fillColor = ~pal(poverty_gap_urban), # Color polygons 
+    fillOpacity = 1,
+    weight = 0.3,
+    smoothFactor = 0.3,
+    label = labels,
+    labelOptions = labelOptions(
+      style = list("font-family" = "serif", "font-weight" = "normal", padding = "3px 8px"),
+      "box-shadow" = "3px 3px rgba(0,0,0,0.25)",
+      "font-size" = "12px",
+      "border-color" = "rgba(0,0,0,0.5)",
+      direction = "auto"
+    ),
+    highlightOptions = highlightOptions(color = "black", weight = 2, bringToFront = TRUE)
+  ) %>%
+  addLegend(
+    pal = pal,
+    values = urban_poverty_gap$poverty_gap_urban,
+    position = "bottomright",
+    title = "Poverty Gap in Urban Areas"
+  )
+
+# Display the map
+map
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```
+
+
+## Poverty Line Province Level 
+ 
+```{r}
+
+
+poverty_line_data <- household_combined %>%
+  group_by(province_name) %>%
+  summarise(
+    median_expenditure = median(percapita_expenditure, na.rm = TRUE),  
+    .groups = "drop"
+  )
+
+poverty_line_data <- poverty_line_data %>%
+  mutate(
+    poverty_line_median = 0.5 * median_expenditure,  # 50% of median expenditure
+  )
+
+poverty_line_data <- poverty_line_data %>%
+  select(province_name,poverty_line_median)
+poverty_line_data
+
+
+
+
+
+
+```
+
+```{r}
+poverty_line_data <- left_join(iran, poverty_line_data, by = "province_name")
+
+
+
+
+pal <- colorNumeric(palette = "YlOrRd", domain = poverty_line_data$poverty_line_median)
+
+labels <- sprintf(
+  "<strong>%s</strong><br/>Poverty Line: %g",
+  poverty_line_data$province_name, poverty_line_data$poverty_line_median
+) %>% lapply(htmltools::HTML)
+
+# Create the leaflet map
+map <- leaflet(poverty_line_data) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>% # Use a base tile layer
+  addPolygons(
+    fillColor = ~pal(poverty_line_median), # Color polygons 
+    fillOpacity = 1,
+    weight = 0.3,
+    smoothFactor = 0.3,
+    label = labels,
+    labelOptions = labelOptions(
+      style = list("font-family" = "serif", "font-weight" = "normal", padding = "3px 8px"),
+      "box-shadow" = "3px 3px rgba(0,0,0,0.25)",
+      "font-size" = "12px",
+      "border-color" = "rgba(0,0,0,0.5)",
+      direction = "auto"
+    ),
+    highlightOptions = highlightOptions(color = "black", weight = 2, bringToFront = TRUE)
+  ) %>%
+  addLegend(
+    pal = pal,
+    values = poverty_line_data$poverty_line_median,
+    position = "bottomright",
+    title = "Poverty Line"
+  )
+
+# Display the map
+map
+
+
+
+
+
+
+
+
+```
+
+
+
+# Illustration and Comparison
+
+The main pattern that we see is that poverty most of the time increase with higher distance from capital. as you go from capital to borders, the poverty and inequality increases.
+As we see there is a correlation between inequality and poverty. places with higher poverty most of the time experience more inequality. There can be many mechanisms that can explain the reason of that. Poorers are more vulnarable to inflation, and when inflation is hight, they would hurt more than wealthiers. instead those who are not poor, most of the time have enough wealth or jobs that can protect themselves from poverty and this can lead to more and more inequality. 
+
+
